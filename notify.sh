@@ -13,6 +13,23 @@ load_env() {
   fi
 }
 
+resolve_body_mode() {
+  body_mode="${NTFY_BODY_MODE:-output}"
+  case "$body_mode" in
+    output | status)
+      return 0
+      ;;
+    *)
+      echo "invalid NTFY_BODY_MODE; expected output or status" >&2
+      return 1
+      ;;
+  esac
+}
+
+status_body() {
+  printf 'Status: %s\nPane: %s\n' "$1" "$(clean_label "$2" "unknown")"
+}
+
 json_value() {
   name="$1"
   json="${2:-}"
@@ -180,6 +197,7 @@ send_ntfy() {
 
 dry_run() {
   load_env
+  resolve_body_mode
 
   ok=1
   ntfy_url="${NTFY_URL:-}"
@@ -216,6 +234,7 @@ dry_run() {
   fi
 
   echo "NTFY_TITLE: $ntfy_title"
+  echo "NTFY_BODY_MODE: $body_mode"
 
   if [ -n "${NTFY_TOKEN:-}" ]; then
     echo "NTFY_TOKEN: set"
@@ -223,7 +242,9 @@ dry_run() {
     echo "NTFY_TOKEN: not set"
   fi
 
-  if is_positive_integer "$lines"; then
+  if [ "$body_mode" = status ]; then
+    echo "NTFY_LINES: unused (status mode)"
+  elif is_positive_integer "$lines"; then
     echo "NTFY_LINES: $lines"
   else
     echo "NTFY_LINES: invalid; expected a positive integer"
@@ -247,7 +268,11 @@ dry_run() {
   echo "✅ verification・dry-run (${ntfy_title})"
   echo
   echo "Sample body:"
-  echo "Herdr ntfy dry-run: no notification was sent."
+  if [ "$body_mode" = status ]; then
+    status_body done wE:p1
+  else
+    echo "Herdr ntfy dry-run: no notification was sent."
+  fi
 
   if [ -n "$collie_url" ] && is_http_url "$collie_url"; then
     echo
@@ -268,6 +293,7 @@ dry_run() {
 
 test_notification() {
   load_env
+  resolve_body_mode
 
   ok=1
   ntfy_url="${NTFY_URL:-}"
@@ -296,6 +322,7 @@ test_notification() {
   fi
 
   echo "NTFY_TITLE: $ntfy_title"
+  echo "NTFY_BODY_MODE: $body_mode"
 
   if [ -n "${NTFY_TOKEN:-}" ]; then
     echo "NTFY_TOKEN: set"
@@ -357,6 +384,7 @@ if [ "${1:-}" = "--test" ]; then
 fi
 
 load_env
+resolve_body_mode
 
 event_json="${HERDR_PLUGIN_EVENT_JSON:-}"
 context_json="${HERDR_PLUGIN_CONTEXT_JSON:-}"
@@ -424,20 +452,27 @@ workspace_name="$(clean_label "$workspace_name" "workspace")"
 tab_name="$(clean_label "$tab_name" "tab")"
 title="${emoji} ${workspace_name}・${tab_name} (${ntfy_title})"
 
-herdr_bin="${HERDR_BIN_PATH:-herdr}"
-lines="${NTFY_LINES:-12}"
-body=""
+case "$body_mode" in
+  status)
+    body="$(status_body "$status" "$pane_id")"
+    ;;
+  output)
+    herdr_bin="${HERDR_BIN_PATH:-herdr}"
+    lines="${NTFY_LINES:-12}"
+    body=""
 
-if [ -n "$pane_id" ]; then
-  body="$("$herdr_bin" pane read "$pane_id" --source recent-unwrapped --lines "$lines" 2>/dev/null || true)"
-fi
+    if [ -n "$pane_id" ]; then
+      body="$("$herdr_bin" pane read "$pane_id" --source recent-unwrapped --lines "$lines" 2>/dev/null || true)"
+    fi
 
-if [ -z "$body" ]; then
-  body="$(first_value \
-    "$(json_value HERDR_PLUGIN_EVENT_JSON "$event_json" '.data.message')" \
-    "$(json_value HERDR_PLUGIN_CONTEXT_JSON "$context_json" '.message')" \
-    "$status" \
-  )"
-fi
+    if [ -z "$body" ]; then
+      body="$(first_value \
+        "$(json_value HERDR_PLUGIN_EVENT_JSON "$event_json" '.data.message')" \
+        "$(json_value HERDR_PLUGIN_CONTEXT_JSON "$context_json" '.message')" \
+        "$status" \
+      )"
+    fi
+    ;;
+esac
 
 send_ntfy "$title" "$body" "$click_url"

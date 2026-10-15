@@ -1,4 +1,5 @@
 #!/bin/sh
 set -eu
 
-printf 'Agent output from the test pane.\n'
+printf '%s\n' "$*" >>"$NTFY_TEST_READS"
+printf '%s\n' "${NTFY_TEST_OUTPUT-Agent output from the test pane.}"
