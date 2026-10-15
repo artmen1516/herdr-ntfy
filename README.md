@@ -25,7 +25,7 @@ Set it in the plugin config directory .env file.
 - `done` and `working → idle` use `✅`; `blocked` uses `🚫`.
 - The plugin stores the latest status for each pane under the plugin config directory so it can recognize `working → idle` transitions.
 - The notification title is `<emoji> <workspace>・<tab> (<NTFY_TITLE>)`.
-- The notification body is recent output from the agent pane.
+- The notification body is recent output from the agent pane by default. Set `NTFY_BODY_MODE=status` to send only the status and pane ID.
 - When `COLLIE_URL` is set, the notification includes a `Click` action that opens the source pane in [Collie](https://github.com/AltanS/collie) at `<COLLIE_URL>/pane/<pane_id>`.
 - The plugin does not send a `Priority` header.
 
@@ -52,11 +52,35 @@ Create `$config_dir/.env`, restrict its permissions, and put this in it.
 NTFY_URL=https://ntfy.sh/your-topic
 NTFY_TITLE=Herdr
 NTFY_TOKEN=
+NTFY_BODY_MODE=output
 NTFY_LINES=12
 COLLIE_URL=
 ```
 
 Set `NTFY_TOKEN` when using a protected topic.
+
+### Notification body mode
+
+`NTFY_BODY_MODE` accepts `output` (default) or `status`. An unset or empty value selects `output`, which keeps recent pane output and the existing empty-output message fallback. In output mode, `NTFY_LINES` controls the number of recent lines.
+
+To receive only state and location, set this in the plugin config directory `.env`:
+
+```sh
+NTFY_BODY_MODE=status
+```
+
+An agent waiting for input produces a notification such as:
+
+```text
+Title: 🚫 herdr-ntfy・main (Herdr)
+
+Status: blocked
+Pane: w1:p2
+```
+
+Status mode never reads terminal output or copies free-form event/context messages. `NTFY_LINES` is unused, including during dry-run validation. The body reports Herdr's actual `done`, `blocked`, or eligible `idle` status; a missing pane ID appears as `unknown`. Workspace/tab labels remain in the title, and optional Collie links remain available.
+
+Values are case-sensitive. Any other nonempty mode makes the hook, dry-run, or test action fail without reading pane output or sending a notification.
 
 ### Optional Collie integration
 
@@ -85,6 +109,7 @@ curl: ok
 jq: ok
 NTFY_URL: ok (https://ntfy.sh/your-...)
 NTFY_TITLE: Herdr
+NTFY_BODY_MODE: output
 NTFY_TOKEN: not set
 NTFY_LINES: 12
 COLLIE_URL: ok (https://your-tailnet-host.ts.net)
@@ -103,9 +128,16 @@ Result: ok
 
 `action invoke` runs asynchronously. Check the plugin log for the dry-run output.
 
+With `NTFY_BODY_MODE=status`, dry-run shows `NTFY_LINES: unused (status mode)` and this synthetic body without reading a pane or sending a notification:
+
+```text
+Status: done
+Pane: wE:p1
+```
+
 ## test
 
-Send a real test notification to ntfy.
+Send a real test notification to ntfy. The action validates and reports the selected mode, but always sends the same generic test body without reading a pane or adding a Collie link.
 
 ```console
 $ herdr plugin action invoke test
@@ -117,6 +149,7 @@ Herdr ntfy test
 curl: ok
 NTFY_URL: ok (https://ntfy.sh/your-...)
 NTFY_TITLE: Herdr
+NTFY_BODY_MODE: output
 NTFY_TOKEN: not set
 COLLIE_URL: not set (notifications will have no click action)
 
@@ -148,6 +181,8 @@ Run the transition tests with:
 ```sh
 sh tests/notify_test.sh
 ```
+
+The suite also covers body modes and diagnostic actions with local `herdr` and `curl` substitutes; it sends no real notifications. It pins `HERDR_BIN_PATH` to the substitute, including when run inside Herdr.
 
 ## Marketplace
 
