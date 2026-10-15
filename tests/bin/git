@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$NTFY_TEST_GIT_CALLS"
+[ "$#" -eq 6 ] && [ "$1" = -C ] && [ "$3" = symbolic-ref ] &&
+  [ "$4" = --quiet ] && [ "$5" = --short ] && [ "$6" = HEAD ] || exit 1
+case "$NTFY_TEST_GIT_MODE" in
+  missing) exit 127 ;;
+  detached | nonrepository) exit 1 ;;
+  blank) printf ' \n'; exit 0 ;;
+  timeout) exec sleep 10 ;;
+  real) exec "$NTFY_TEST_REAL_GIT" "$@" ;;
+  ok) printf '%s\n' "$NTFY_TEST_GIT_BRANCH" ;;
+  *) exit 1 ;;
+esac

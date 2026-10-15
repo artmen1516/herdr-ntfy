@@ -27,8 +27,98 @@ resolve_body_mode() {
 }
 
 status_body() {
-  printf 'Status: %s\nPane: %s\n' "$1" "$(clean_label "$2" "unknown")"
+  printf 'Status: %s\n' "$1"
+  branch_label="$(clean_label "${2:-}" '')"
+  if [ -n "$branch_label" ]; then printf 'Branch: %s\n' "$branch_label"; fi
 }
+
+bounded_output() (
+  # Bound each read-only CLI call to one second without a timeout dependency.
+  # Capture to a file so a wrapper's descendants cannot hold stdout open.
+  lookup_dir="$(mktemp -d)" || exit 0
+  trap 'rm -rf "$lookup_dir"' 0
+  "$@" >"$lookup_dir/result" 2>/dev/null &
+  lookup_pid=$!
+  (sleep 1; kill -KILL "$lookup_pid" 2>/dev/null || true) >/dev/null 2>&1 &
+  timer_pid=$!
+  lookup_ok=0
+  if wait "$lookup_pid" 2>/dev/null; then lookup_ok=1; fi
+  kill "$timer_pid" 2>/dev/null || true
+  wait "$timer_pid" 2>/dev/null || true
+  if [ "$lookup_ok" -eq 1 ]; then cat "$lookup_dir/result"; fi
+)
+
+metadata_get() {
+  bounded_output "${HERDR_BIN_PATH:-herdr}" "$@"
+}
+
+source_branch() (
+  # Use only the verified source cwd, not the publisher's inherited Git paths.
+  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_NAMESPACE
+  unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES
+  bounded_output git -C "$1" symbolic-ref --quiet --short HEAD
+)
+
+status_location() (
+  source_pane="$1"
+  # Context describes UI focus unless its pane and known location IDs agree
+  # with the event source. Event fields belong only to their own pane.
+  location="$(jq -cn --arg pane "$source_pane" --arg event "$event_json" \
+    --arg context "$context_json" '
+    def text: if type == "string" and test("[^ \\t\\r\\n]") then . else null end;
+    def wid: (.workspace_id | text) // (.workspace.workspace_id | text) // (.workspace.id | text);
+    def tid: (.tab_id | text) // (.tab.tab_id | text) // (.tab.id | text);
+    def compatible($a; $b): $a == null or $b == null or $a == $b;
+    ($event | fromjson? // {} | .data // {}) as $data |
+    (if ($data.pane_id // "") == $pane then $data else {} end) as $e |
+    ($context | fromjson? // {}) as $raw_context |
+    ([$raw_context.focused_pane_id, $raw_context.pane_id] | map(text) | map(select(. != null))) as $panes |
+    (if $pane != "" and ($panes | length) > 0 and all($panes[]; . == $pane)
+      and compatible(($e | wid); ($raw_context | wid))
+      and compatible(($e | tid); ($raw_context | tid))
+      then $raw_context else {} end) as $c |
+    {workspace_id: (($e | wid) // ($c | wid) // ""),
+     tab_id: (($e | tid) // ($c | tid) // ""),
+     agent_name: (($e.display_agent | text) // ($e.agent | text) // ($c.focused_pane_agent | text) // ""),
+     workspace_name: (($e.workspace_label | text) // ($e.workspace.name | text) // ($e.workspace.label | text)
+       // ($c.workspace_label | text) // ($c.workspace.name | text) // ($c.workspace.label | text) // ""),
+     branch: ""}
+  ' 2>/dev/null)" || location='{}'
+
+  if [ -n "$source_pane" ]; then
+    pane_json="$(metadata_get pane get "$source_pane")"
+    resolved="$(printf '%s' "$pane_json" | jq -c --arg pane "$source_pane" \
+      --argjson location "$location" '
+      def text: if type == "string" and test("[^ \\t\\r\\n]") then . else null end;
+      .result.pane | select(.pane_id == $pane) |
+      select((.workspace_id | type) == "string" and (.tab_id | type) == "string") |
+      select(.workspace_id != "" and .tab_id != "") |
+      select(($location.workspace_id // "") == "" or $location.workspace_id == .workspace_id) |
+      select(($location.tab_id // "") == "" or $location.tab_id == .tab_id) |
+      $location + {workspace_id: .workspace_id, tab_id: .tab_id,
+        agent_name: (($location.agent_name | text) // (.display_agent | text) // (.agent | text) // ""),
+        source_cwd: ((.foreground_cwd | text) // (.cwd | text) // "")}
+    ' 2>/dev/null)" || resolved=''
+    if [ -n "$resolved" ]; then
+      location="$resolved"
+      source_workspace="$(printf '%s' "$location" | jq -r '.workspace_id')"
+      if [ "$(printf '%s' "$location" | jq -r '.workspace_name // ""')" = '' ]; then
+        workspace_json="$(metadata_get workspace get "$source_workspace")"
+        workspace_label="$(printf '%s' "$workspace_json" | jq -r --arg id "$source_workspace" \
+          '.result.workspace | select(.workspace_id == $id) | .label | strings' 2>/dev/null)" || workspace_label=''
+        location="$(printf '%s' "$location" | jq -c --arg name "$workspace_label" '.workspace_name = $name')"
+      fi
+      source_cwd="$(printf '%s' "$location" | jq -r '.source_cwd // ""')"
+      case "$source_cwd" in
+        /*)
+          branch="$(source_branch "$source_cwd")"
+          location="$(printf '%s' "$location" | jq -c --arg branch "$branch" '.branch = $branch')"
+          ;;
+      esac
+    fi
+  fi
+  printf '%s' "$location"
+)
 
 json_value() {
   name="$1"
@@ -265,11 +355,15 @@ dry_run() {
 
   echo
   echo "Sample title:"
-  echo "✅ verification・dry-run (${ntfy_title})"
+  if [ "$body_mode" = status ]; then
+    echo "✅ verification · Codex (${ntfy_title})"
+  else
+    echo "✅ verification・dry-run (${ntfy_title})"
+  fi
   echo
   echo "Sample body:"
   if [ "$body_mode" = status ]; then
-    status_body done wE:p1
+    status_body done feature/example
   else
     echo "Herdr ntfy dry-run: no notification was sent."
   fi
@@ -431,30 +525,39 @@ fi
 click_url="$(collie_click_url "${COLLIE_URL:-}" "$pane_id")"
 
 ntfy_title="$(clean_label "${NTFY_TITLE:-Herdr}" "Herdr")"
-workspace_name="$(first_value \
-  "$(json_value HERDR_PLUGIN_CONTEXT_JSON "$context_json" '.workspace_label')" \
-  "$(json_value HERDR_PLUGIN_CONTEXT_JSON "$context_json" '.workspace.name')" \
-  "$(json_value HERDR_PLUGIN_CONTEXT_JSON "$context_json" '.workspace.label')" \
-  "$(json_value HERDR_PLUGIN_EVENT_JSON "$event_json" '.data.workspace_label')" \
-  "$(json_value HERDR_PLUGIN_EVENT_JSON "$event_json" '.data.workspace_id')" \
-  "${HERDR_WORKSPACE_ID:-}" \
-)"
-tab_name="$(first_value \
-  "$(json_value HERDR_PLUGIN_CONTEXT_JSON "$context_json" '.tab_label')" \
-  "$(json_value HERDR_PLUGIN_CONTEXT_JSON "$context_json" '.tab.name')" \
-  "$(json_value HERDR_PLUGIN_CONTEXT_JSON "$context_json" '.tab.label')" \
-  "$(json_value HERDR_PLUGIN_EVENT_JSON "$event_json" '.data.tab_label')" \
-  "$(json_value HERDR_PLUGIN_EVENT_JSON "$event_json" '.data.tab_id')" \
-  "${HERDR_TAB_ID:-}" \
-)"
+if [ "$body_mode" = status ]; then
+  location="$(status_location "$pane_id")"
+  workspace_id="$(json_value location "$location" '.workspace_id')"
+  agent_name="$(clean_label "$(json_value location "$location" '.agent_name')" unknown)"
+  branch="$(json_value location "$location" '.branch')"
+  workspace_name="$(clean_label "$(json_value location "$location" '.workspace_name')" "$(clean_label "$workspace_id" unknown)")"
+  title="${emoji} ${workspace_name} · ${agent_name} (${ntfy_title})"
+else
+  workspace_name="$(first_value \
+    "$(json_value HERDR_PLUGIN_CONTEXT_JSON "$context_json" '.workspace_label')" \
+    "$(json_value HERDR_PLUGIN_CONTEXT_JSON "$context_json" '.workspace.name')" \
+    "$(json_value HERDR_PLUGIN_CONTEXT_JSON "$context_json" '.workspace.label')" \
+    "$(json_value HERDR_PLUGIN_EVENT_JSON "$event_json" '.data.workspace_label')" \
+    "$(json_value HERDR_PLUGIN_EVENT_JSON "$event_json" '.data.workspace_id')" \
+    "${HERDR_WORKSPACE_ID:-}" \
+  )"
+  tab_name="$(first_value \
+    "$(json_value HERDR_PLUGIN_CONTEXT_JSON "$context_json" '.tab_label')" \
+    "$(json_value HERDR_PLUGIN_CONTEXT_JSON "$context_json" '.tab.name')" \
+    "$(json_value HERDR_PLUGIN_CONTEXT_JSON "$context_json" '.tab.label')" \
+    "$(json_value HERDR_PLUGIN_EVENT_JSON "$event_json" '.data.tab_label')" \
+    "$(json_value HERDR_PLUGIN_EVENT_JSON "$event_json" '.data.tab_id')" \
+    "${HERDR_TAB_ID:-}" \
+  )"
 
-workspace_name="$(clean_label "$workspace_name" "workspace")"
-tab_name="$(clean_label "$tab_name" "tab")"
-title="${emoji} ${workspace_name}・${tab_name} (${ntfy_title})"
+  workspace_name="$(clean_label "$workspace_name" "workspace")"
+  tab_name="$(clean_label "$tab_name" "tab")"
+  title="${emoji} ${workspace_name}・${tab_name} (${ntfy_title})"
+fi
 
 case "$body_mode" in
   status)
-    body="$(status_body "$status" "$pane_id")"
+    body="$(status_body "$status" "$branch")"
     ;;
   output)
     herdr_bin="${HERDR_BIN_PATH:-herdr}"
