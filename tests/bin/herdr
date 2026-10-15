@@ -1,5 +1,22 @@
 #!/bin/sh
 set -eu
 
-printf '%s\n' "$*" >>"$NTFY_TEST_READS"
-printf '%s\n' "${NTFY_TEST_OUTPUT-Agent output from the test pane.}"
+case "$1 $2" in
+  'pane read')
+    printf '%s\n' "$*" >>"$NTFY_TEST_READS"
+    printf '%s\n' "${NTFY_TEST_OUTPUT-Agent output from the test pane.}"
+    ;;
+  'pane get' | 'workspace get')
+    printf '%s\n' "$*" >>"$NTFY_TEST_METADATA_CALLS"
+    case "$NTFY_TEST_METADATA_MODE" in
+      fail) exit 1 ;;
+      timeout) exec sleep 10 ;;
+      invalid) printf 'not-json\n'; exit 0 ;;
+    esac
+    case "$1" in
+      pane) printf '%s\n' "$NTFY_TEST_PANE_JSON" ;;
+      workspace) printf '%s\n' "$NTFY_TEST_WORKSPACE_JSON" ;;
+    esac
+    ;;
+  *) echo 'unexpected Herdr command in test' >&2; exit 1 ;;
+esac
